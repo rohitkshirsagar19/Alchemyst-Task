@@ -1,0 +1,6 @@
+AGENTS.md
+node_modules
+.next
+dist
+npm-debug.log*
+.env.local
