@@ -1,18 +1,28 @@
-export function MessageInput() {
+import type { FormEvent } from "react";
+
+type MessageInputProps = {
+  disabled: boolean;
+  onChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  value: string;
+};
+
+export function MessageInput({ disabled, onChange, onSubmit, value }: MessageInputProps) {
   return (
-    <form className="composer">
+    <form className="composer" onSubmit={onSubmit}>
       <label className="composer__label" htmlFor="message">
-        Message
+        USER_MESSAGE
       </label>
       <div className="composer__row">
         <input
           id="message"
           name="message"
           className="composer__input"
-          placeholder="Phase 1 scaffold: input wiring starts next."
-          disabled
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="Type a prompt for the agent server"
         />
-        <button type="button" className="composer__button" disabled>
+        <button type="submit" className="composer__button" disabled={disabled}>
           Send
         </button>
       </div>

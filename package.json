@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "node --import tsx --test src/lib/protocol/orderingBuffer.test.ts"
   },
   "dependencies": {
     "next": "^15.0.0",
@@ -16,6 +17,7 @@
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
+    "tsx": "^4.20.6",
     "typescript": "^5.7.2"
   },
   "engines": {

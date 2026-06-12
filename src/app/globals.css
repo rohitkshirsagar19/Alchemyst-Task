@@ -351,3 +351,131 @@ a {
 .list-row--system {
   border-left: 4px solid #6b7280;
 }
+
+.list-row--received {
+  border-left: 4px solid #2c5282;
+}
+
+.list-row--processed {
+  border-left: 4px solid #2f855a;
+}
+
+.chat-transcript {
+  display: flex;
+  min-height: 280px;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-transcript__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.chat-transcript__messages {
+  display: flex;
+  max-height: 420px;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.chat-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 14px 16px;
+}
+
+.chat-transcript {
+  display: flex;
+  min-height: 280px;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-transcript__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.chat-transcript__messages {
+  display: flex;
+  max-height: 420px;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.chat-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 14px 16px;
+}
+
+.chat-bubble--user {
+  align-self: flex-end;
+  width: min(100%, 75%);
+  background: #f6eee2;
+}
+
+.chat-bubble--assistant {
+  align-self: flex-start;
+  width: min(100%, 85%);
+  background: var(--panel-strong);
+}
+
+.chat-bubble__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  font-family: "Courier New", monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.chat-bubble__text {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.status-badge {
+  display: inline-flex;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--accent-soft);
+}
+
+.status-badge--streaming {
+  color: var(--accent);
+}
+
+.status-badge--ended {
+  color: #8a5a18;
+}
+
+.status-badge--error {
+  color: #a11d33;
+}
+
+.debug-log__footer {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}

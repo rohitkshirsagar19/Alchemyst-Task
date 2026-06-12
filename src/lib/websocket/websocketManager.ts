@@ -1,4 +1,4 @@
-import { serializeClientMessage } from "@/lib/protocol/clientMessages";
+import { buildPong, serializeClientMessage } from "@/lib/protocol/clientMessages";
 import type { ClientMessage, ServerMessage, ValidationResult } from "@/lib/protocol/types";
 import { parseServerMessage } from "@/lib/protocol/validators";
 
@@ -20,11 +20,17 @@ export interface InvalidSocketMessageEvent {
   reason: string;
 }
 
+export interface OutboundSocketMessageEvent {
+  message: ClientMessage;
+  source: "manual" | "heartbeat";
+}
+
 export interface WebSocketManagerOptions {
   url: string;
   onStatusChange?: (status: WebSocketConnectionStatus) => void;
   onOpen?: () => void;
   onMessage?: (event: ParsedSocketMessageEvent) => void;
+  onSend?: (event: OutboundSocketMessageEvent) => void;
   onInvalidMessage?: (event: InvalidSocketMessageEvent) => void;
   onClose?: (event: CloseEvent) => void;
   onError?: (event: Event) => void;
@@ -91,6 +97,10 @@ export class WebSocketManager {
   }
 
   send(message: ClientMessage): ValidationResult<void> {
+    return this.sendInternal(message, "manual");
+  }
+
+  private sendInternal(message: ClientMessage, source: OutboundSocketMessageEvent["source"]): ValidationResult<void> {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return {
         ok: false,
@@ -99,6 +109,11 @@ export class WebSocketManager {
     }
 
     this.socket.send(serializeClientMessage(message));
+    this.options.onSend?.({
+      message,
+      source,
+    });
+
     return {
       ok: true,
       value: undefined,
@@ -122,6 +137,10 @@ export class WebSocketManager {
         reason: parsed.reason,
       });
       return;
+    }
+
+    if (parsed.value.type === "PING") {
+      this.sendInternal(buildPong(parsed.value.challenge), "heartbeat");
     }
 
     this.options.onMessage?.({
