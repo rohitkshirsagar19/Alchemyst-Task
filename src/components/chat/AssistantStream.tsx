@@ -1,6 +1,7 @@
 import { memo } from "react";
 import type { ChatMessage } from "@/lib/store/agentStore";
-import { selectMessageText } from "@/lib/store/selectors";
+import { selectBlockText } from "@/lib/store/selectors";
+import { ToolCallCard } from "@/components/chat/ToolCallCard";
 
 type AssistantStreamProps = {
   message: ChatMessage;
@@ -15,7 +16,15 @@ function AssistantStreamComponent({ message }: AssistantStreamProps) {
           {message.status ?? "streaming"}
         </span>
       </div>
-      <p className="chat-bubble__text">{selectMessageText(message)}</p>
+      <div className="assistant-blocks">
+        {(message.blocks ?? []).map((block) => (
+          block.type === "text" ? (
+            <p key={block.id} className="chat-bubble__text">{selectBlockText(block)}</p>
+          ) : (
+            <ToolCallCard key={block.id} block={block} />
+          )
+        ))}
+      </div>
     </article>
   );
 }

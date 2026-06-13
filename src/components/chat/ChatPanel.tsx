@@ -1,7 +1,7 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AssistantStream } from "@/components/chat/AssistantStream";
 import { MessageInput } from "@/components/chat/MessageInput";
 import { TransportDebugConsole, type DebugEntry } from "@/components/chat/TransportDebugConsole";
@@ -10,8 +10,8 @@ import { AGENT_WS_URL } from "@/lib/config/env";
 import { buildUserMessage } from "@/lib/protocol/clientMessages";
 import { createOrderingBuffer, type OrderedPushResult } from "@/lib/protocol/orderingBuffer";
 import type { ClientMessage, ServerMessage } from "@/lib/protocol/types";
-import { agentReducer, initialAgentState, type ChatMessage } from "@/lib/store/agentStore";
-import { selectChatMessages } from "@/lib/store/selectors";
+import { agentReducer, initialAgentState, type AgentAction, type AgentState, type ChatMessage } from "@/lib/store/agentStore";
+import { selectChatMessages, selectToolBlockByCallId } from "@/lib/store/selectors";
 import {
   WebSocketManager,
   type InvalidSocketMessageEvent,
@@ -24,11 +24,16 @@ export function ChatPanel() {
   const [status, setStatus] = useState<WebSocketConnectionStatus>("idle");
   const [draft, setDraft] = useState("hello");
   const [entries, setEntries] = useState<DebugEntry[]>([]);
-  const [state, dispatch] = useReducer(agentReducer, initialAgentState);
+  const [state, setState] = useState<AgentState>(initialAgentState);
   const managerRef = useRef<WebSocketManager | null>(null);
   const nextIdRef = useRef(1);
   const userMessageCountRef = useRef(1);
   const orderingBufferRef = useRef(createOrderingBuffer({ initialExpectedSeq: 1 }));
+  const stateRef = useRef<AgentState>(initialAgentState);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   useEffect(() => {
     const manager = new WebSocketManager({
@@ -46,14 +51,18 @@ export function ChatPanel() {
         const result = orderingBufferRef.current.push(event.message);
         appendOrderingOutcome(result);
         if (result.processed.length > 0) {
-          dispatch({
+          const nextState = applyAction({
             type: "APPLY_PROCESSED_MESSAGES",
             messages: result.processed,
           });
+          handleProcessedSideEffects(result.processed, nextState);
         }
       },
       onSend: (event) => {
         appendOutboundEntry(event);
+      },
+      onToolAckSuppressed: (event) => {
+        appendSystemEntry("TOOL_ACK_SKIPPED", `Skipped duplicate fast ACK for ${event.callId}.`);
       },
       onInvalidMessage: (event) => {
         appendInvalidEntry(event);
@@ -82,8 +91,23 @@ export function ChatPanel() {
   const canDisconnect = status === "connecting" || status === "open" || status === "error";
   const canSend = status === "open";
 
+  function applyAction(action: AgentAction): AgentState {
+    const nextState = agentReducer(stateRef.current, action);
+    stateRef.current = nextState;
+    setState(nextState);
+    return nextState;
+  }
+
+  function handleProcessedSideEffects(processedMessages: ServerMessage[], nextState: AgentState): void {
+    for (const message of processedMessages) {
+      if (message.type === "TOOL_RESULT" && !selectToolBlockByCallId(nextState.messages, message.call_id)) {
+        appendSystemEntry("TOOL_RESULT_MISSING", `No matching tool block found for result ${message.call_id}.`);
+      }
+    }
+  }
+
   function appendEntry(entry: DebugEntry): void {
-    setEntries((current) => [entry, ...current].slice(0, 120));
+    setEntries((current) => [entry, ...current].slice(0, 140));
   }
 
   function appendSystemEntry(title: string, detail: string): void {
@@ -187,7 +211,7 @@ export function ChatPanel() {
       return;
     }
 
-    dispatch({
+    applyAction({
       type: "ADD_USER_MESSAGE",
       message: {
         id: `user-${userMessageCountRef.current++}`,
@@ -259,7 +283,7 @@ export function ChatPanel() {
 
         <TransportDebugConsole
           entries={entries}
-          footer={<p className="debug-log__meta">Chat rendering currently uses ordered TOKEN and STREAM_END events only.</p>}
+          footer={<p className="debug-log__meta">Chat rendering now handles ordered TOKEN, TOOL_CALL, TOOL_RESULT, and STREAM_END events.</p>}
         />
       </div>
     </Panel>
@@ -292,6 +316,10 @@ function formatOutboundDetail(event: OutboundSocketMessageEvent): string {
       : `heartbeat response (${event.source})`;
 
     return `${prefix}\n${JSON.stringify(event.message, null, 2)}`;
+  }
+
+  if (event.message.type === "TOOL_ACK") {
+    return `tool ack (${event.source})\n${JSON.stringify(event.message, null, 2)}`;
   }
 
   return `${event.source} send\n${JSON.stringify(event.message, null, 2)}`;

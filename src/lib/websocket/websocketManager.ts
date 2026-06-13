@@ -1,4 +1,4 @@
-import { buildPong, serializeClientMessage } from "@/lib/protocol/clientMessages";
+import { buildPong, buildToolAck, serializeClientMessage } from "@/lib/protocol/clientMessages";
 import type { ClientMessage, ServerMessage, ValidationResult } from "@/lib/protocol/types";
 import { parseServerMessage } from "@/lib/protocol/validators";
 
@@ -20,9 +20,13 @@ export interface InvalidSocketMessageEvent {
   reason: string;
 }
 
+export interface SuppressedToolAckEvent {
+  callId: string;
+}
+
 export interface OutboundSocketMessageEvent {
   message: ClientMessage;
-  source: "manual" | "heartbeat";
+  source: "manual" | "heartbeat" | "tool_ack";
 }
 
 export interface WebSocketManagerOptions {
@@ -31,6 +35,7 @@ export interface WebSocketManagerOptions {
   onOpen?: () => void;
   onMessage?: (event: ParsedSocketMessageEvent) => void;
   onSend?: (event: OutboundSocketMessageEvent) => void;
+  onToolAckSuppressed?: (event: SuppressedToolAckEvent) => void;
   onInvalidMessage?: (event: InvalidSocketMessageEvent) => void;
   onClose?: (event: CloseEvent) => void;
   onError?: (event: Event) => void;
@@ -39,6 +44,7 @@ export interface WebSocketManagerOptions {
 export class WebSocketManager {
   private socket: WebSocket | null = null;
   private status: WebSocketConnectionStatus = "idle";
+  private readonly acknowledgedToolCalls = new Set<string>();
   private readonly options: WebSocketManagerOptions;
 
   constructor(options: WebSocketManagerOptions) {
@@ -63,6 +69,7 @@ export class WebSocketManager {
         return;
       }
       this.setStatus("open");
+      this.acknowledgedToolCalls.clear();
       this.options.onOpen?.();
     };
 
@@ -143,10 +150,29 @@ export class WebSocketManager {
       this.sendInternal(buildPong(parsed.value.challenge), "heartbeat");
     }
 
+    if (parsed.value.type === "TOOL_CALL") {
+      this.acknowledgeToolCall(parsed.value.call_id);
+    }
+
     this.options.onMessage?.({
       raw: rawResult.value,
       message: parsed.value,
     });
+  }
+
+  private acknowledgeToolCall(callId: string): void {
+    if (this.acknowledgedToolCalls.has(callId)) {
+      this.options.onToolAckSuppressed?.({ callId });
+      return;
+    }
+
+    // TOOL_ACK is intentionally sent from the raw validated message path.
+    // Chaos mode can delay ordered rendering behind seq gaps, but the server's
+    // ACK timeout starts as soon as it sends TOOL_CALL.
+    const result = this.sendInternal(buildToolAck(callId), "tool_ack");
+    if (result.ok) {
+      this.acknowledgedToolCalls.add(callId);
+    }
   }
 
   private setStatus(status: WebSocketConnectionStatus): void {

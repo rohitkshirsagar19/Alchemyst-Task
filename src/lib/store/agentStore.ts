@@ -1,4 +1,4 @@
-import type { ServerMessage } from "@/lib/protocol/types";
+import type { JsonValue, ServerMessage } from "@/lib/protocol/types";
 
 export interface TextStreamBlock {
   type: "text";
@@ -8,7 +8,20 @@ export interface TextStreamBlock {
   seqEnd: number;
 }
 
-export type StreamBlock = TextStreamBlock;
+export interface ToolStreamBlock {
+  type: "tool";
+  id: string;
+  callId: string;
+  toolName: string;
+  args: JsonValue;
+  result?: JsonValue;
+  status: "waiting" | "completed" | "error";
+  streamId: string;
+  callSeq: number;
+  resultSeq?: number;
+}
+
+export type StreamBlock = TextStreamBlock | ToolStreamBlock;
 
 export interface ChatMessage {
   id: string;
@@ -55,12 +68,14 @@ function applyServerMessage(state: AgentState, message: ServerMessage): AgentSta
   switch (message.type) {
     case "TOKEN":
       return appendToken(state, message);
+    case "TOOL_CALL":
+      return appendToolCall(state, message);
+    case "TOOL_RESULT":
+      return applyToolResult(state, message);
     case "STREAM_END":
       return markStreamEnded(state, message.stream_id);
     case "ERROR":
       return markLatestAssistantError(state);
-    case "TOOL_CALL":
-    case "TOOL_RESULT":
     case "CONTEXT_SNAPSHOT":
     case "PING":
       return state;
@@ -70,11 +85,9 @@ function applyServerMessage(state: AgentState, message: ServerMessage): AgentSta
 }
 
 function appendToken(state: AgentState, message: Extract<ServerMessage, { type: "TOKEN" }>): AgentState {
-  const existingIndex = state.messages.findIndex(
-    (entry) => entry.role === "assistant" && entry.streamId === message.stream_id,
-  );
+  const { existingIndex, existingMessage } = ensureAssistantMessageForStream(state, message.stream_id);
 
-  if (existingIndex === -1) {
+  if (!existingMessage) {
     const block: TextStreamBlock = {
       type: "text",
       id: `${message.stream_id}:text:1`,
@@ -98,10 +111,9 @@ function appendToken(state: AgentState, message: Extract<ServerMessage, { type: 
     };
   }
 
-  const existing = state.messages[existingIndex];
-  const blocks = existing.blocks ?? [];
+  const blocks = existingMessage.blocks ?? [];
   const lastBlock = blocks.at(-1);
-  const nextBlocks: TextStreamBlock[] = lastBlock
+  const nextBlocks: StreamBlock[] = lastBlock?.type === "text"
     ? [
         ...blocks.slice(0, -1),
         {
@@ -114,7 +126,7 @@ function appendToken(state: AgentState, message: Extract<ServerMessage, { type: 
         ...blocks,
         {
           type: "text",
-          id: `${message.stream_id}:text:${blocks.length + 1}`,
+          id: `${message.stream_id}:text:${countTextBlocks(blocks) + 1}`,
           text: message.text,
           seqStart: message.seq,
           seqEnd: message.seq,
@@ -122,15 +134,91 @@ function appendToken(state: AgentState, message: Extract<ServerMessage, { type: 
       ];
 
   const nextMessage: ChatMessage = {
-    ...existing,
-    status: existing.status === "ended" ? "ended" : "streaming",
-    content: (existing.content ?? "") + message.text,
+    ...existingMessage,
+    status: existingMessage.status === "ended" ? "ended" : "streaming",
+    content: (existingMessage.content ?? "") + message.text,
     blocks: nextBlocks,
   };
 
   return {
     ...state,
     messages: replaceMessage(state.messages, existingIndex, nextMessage),
+  };
+}
+
+function appendToolCall(state: AgentState, message: Extract<ServerMessage, { type: "TOOL_CALL" }>): AgentState {
+  const { existingIndex, existingMessage } = ensureAssistantMessageForStream(state, message.stream_id);
+  const baseMessage = existingMessage ?? {
+    id: message.stream_id,
+    role: "assistant" as const,
+    streamId: message.stream_id,
+    status: "streaming" as const,
+    content: "",
+    blocks: [],
+  };
+
+  const blocks = baseMessage.blocks ?? [];
+  if (blocks.some((block) => block.type === "tool" && block.callId === message.call_id)) {
+    return state;
+  }
+
+  const toolBlock: ToolStreamBlock = {
+    type: "tool",
+    id: `${message.stream_id}:tool:${message.call_id}`,
+    callId: message.call_id,
+    toolName: message.tool_name,
+    args: message.args,
+    status: "waiting",
+    streamId: message.stream_id,
+    callSeq: message.seq,
+  };
+
+  const nextMessage: ChatMessage = {
+    ...baseMessage,
+    status: baseMessage.status === "ended" ? "ended" : "streaming",
+    blocks: [...blocks, toolBlock],
+  };
+
+  if (!existingMessage) {
+    return {
+      ...state,
+      messages: [...state.messages, nextMessage],
+    };
+  }
+
+  return {
+    ...state,
+    messages: replaceMessage(state.messages, existingIndex, nextMessage),
+  };
+}
+
+function applyToolResult(state: AgentState, message: Extract<ServerMessage, { type: "TOOL_RESULT" }>): AgentState {
+  const match = findToolBlock(state.messages, message.call_id);
+  if (!match) {
+    return state;
+  }
+
+  const targetMessage = state.messages[match.messageIndex];
+  const targetBlocks = targetMessage.blocks ?? [];
+  const targetBlock = targetBlocks[match.blockIndex];
+
+  if (!targetBlock || targetBlock.type !== "tool") {
+    return state;
+  }
+
+  const nextBlocks = replaceBlock(targetBlocks, match.blockIndex, {
+    ...targetBlock,
+    result: message.result,
+    resultSeq: message.seq,
+    status: "completed",
+  });
+
+  return {
+    ...state,
+    messages: replaceMessage(state.messages, match.messageIndex, {
+      ...targetMessage,
+      blocks: nextBlocks,
+    }),
   };
 }
 
@@ -173,6 +261,44 @@ function markLatestAssistantError(state: AgentState): AgentState {
     ...state,
     messages: replaceMessage(state.messages, actualIndex, nextMessage),
   };
+}
+
+function ensureAssistantMessageForStream(state: AgentState, streamId: string): {
+  existingIndex: number;
+  existingMessage: ChatMessage | null;
+} {
+  const existingIndex = state.messages.findIndex(
+    (entry) => entry.role === "assistant" && entry.streamId === streamId,
+  );
+
+  return {
+    existingIndex,
+    existingMessage: existingIndex === -1 ? null : state.messages[existingIndex],
+  };
+}
+
+function countTextBlocks(blocks: StreamBlock[]): number {
+  return blocks.filter((block) => block.type === "text").length;
+}
+
+function findToolBlock(messages: ChatMessage[], callId: string): { messageIndex: number; blockIndex: number } | null {
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const blocks = messages[messageIndex].blocks ?? [];
+    const blockIndex = blocks.findIndex((block) => block.type === "tool" && block.callId === callId);
+    if (blockIndex !== -1) {
+      return { messageIndex, blockIndex };
+    }
+  }
+
+  return null;
+}
+
+function replaceBlock(blocks: StreamBlock[], index: number, nextBlock: StreamBlock): StreamBlock[] {
+  return [
+    ...blocks.slice(0, index),
+    nextBlock,
+    ...blocks.slice(index + 1),
+  ];
 }
 
 function replaceMessage(messages: ChatMessage[], index: number, nextMessage: ChatMessage): ChatMessage[] {

@@ -479,3 +479,71 @@ a {
   border-top: 1px solid var(--border);
   padding-top: 10px;
 }
+
+.assistant-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: #f7f6f1;
+  padding: 14px;
+}
+
+.tool-card__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.tool-card__title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.tool-card__meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.tool-card__meta dt {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.tool-card__meta dd {
+  margin: 4px 0 0;
+  font-family: "Courier New", monospace;
+  font-size: 0.82rem;
+}
+
+.tool-card__payload {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-card__code {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: 12px;
+  background: #f0ebe2;
+  padding: 10px 12px;
+  font: 0.82rem/1.5 "Courier New", monospace;
+}
+
+@media (max-width: 720px) {
+  .tool-card__meta {
+    grid-template-columns: 1fr;
+  }
+}
