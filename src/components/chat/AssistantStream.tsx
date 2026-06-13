@@ -5,9 +5,12 @@ import { ToolCallCard } from "@/components/chat/ToolCallCard";
 
 type AssistantStreamProps = {
   message: ChatMessage;
+  selectedCallId: string | null;
+  selectedChatElementId: string | null;
+  onSelectCallId: (callId: string) => void;
 };
 
-function AssistantStreamComponent({ message }: AssistantStreamProps) {
+function AssistantStreamComponent({ message, selectedCallId, selectedChatElementId, onSelectCallId }: AssistantStreamProps) {
   return (
     <article className="chat-bubble chat-bubble--assistant">
       <div className="chat-bubble__meta">
@@ -19,9 +22,20 @@ function AssistantStreamComponent({ message }: AssistantStreamProps) {
       <div className="assistant-blocks">
         {(message.blocks ?? []).map((block) => (
           block.type === "text" ? (
-            <p key={block.id} className="chat-bubble__text">{selectBlockText(block)}</p>
+            <p
+              className={`chat-bubble__text${block.id === selectedChatElementId ? " chat-bubble__text--selected" : ""}`}
+              id={block.id}
+              key={block.id}
+            >
+              {selectBlockText(block)}
+            </p>
           ) : (
-            <ToolCallCard key={block.id} block={block} />
+            <ToolCallCard
+              block={block}
+              isSelected={block.callId === selectedCallId || block.id === selectedChatElementId}
+              key={block.id}
+              onSelect={onSelectCallId}
+            />
           )
         ))}
       </div>

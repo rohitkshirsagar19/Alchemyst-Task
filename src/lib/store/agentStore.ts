@@ -90,7 +90,7 @@ function appendToken(state: AgentState, message: Extract<ServerMessage, { type: 
   if (!existingMessage) {
     const block: TextStreamBlock = {
       type: "text",
-      id: `${message.stream_id}:text:1`,
+      id: textBlockId(message.stream_id, message.seq),
       text: message.text,
       seqStart: message.seq,
       seqEnd: message.seq,
@@ -126,7 +126,7 @@ function appendToken(state: AgentState, message: Extract<ServerMessage, { type: 
         ...blocks,
         {
           type: "text",
-          id: `${message.stream_id}:text:${countTextBlocks(blocks) + 1}`,
+          id: textBlockId(message.stream_id, message.seq),
           text: message.text,
           seqStart: message.seq,
           seqEnd: message.seq,
@@ -277,8 +277,8 @@ function ensureAssistantMessageForStream(state: AgentState, streamId: string): {
   };
 }
 
-function countTextBlocks(blocks: StreamBlock[]): number {
-  return blocks.filter((block) => block.type === "text").length;
+function textBlockId(streamId: string, seqStart: number): string {
+  return streamId + ":text:" + String(seqStart);
 }
 
 function findToolBlock(messages: ChatMessage[], callId: string): { messageIndex: number; blockIndex: number } | null {

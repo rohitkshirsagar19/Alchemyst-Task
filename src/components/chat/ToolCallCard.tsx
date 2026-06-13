@@ -2,11 +2,18 @@ import type { ToolStreamBlock } from "@/lib/store/agentStore";
 
 type ToolCallCardProps = {
   block: ToolStreamBlock;
+  isSelected?: boolean;
+  onSelect?: (callId: string) => void;
 };
 
-export function ToolCallCard({ block }: ToolCallCardProps) {
+export function ToolCallCard({ block, isSelected = false, onSelect }: ToolCallCardProps) {
   return (
-    <article className="tool-card">
+    <article
+      className={`tool-card${isSelected ? " tool-card--selected" : ""}`}
+      data-chat-call-id={block.callId}
+      id={block.id}
+      onClick={() => onSelect?.(block.callId)}
+    >
       <div className="tool-card__header">
         <div>
           <p className="card__label">Tool</p>

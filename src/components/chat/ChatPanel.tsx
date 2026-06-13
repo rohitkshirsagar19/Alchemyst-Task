@@ -4,14 +4,14 @@ import type { FormEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { AssistantStream } from "@/components/chat/AssistantStream";
 import { MessageInput } from "@/components/chat/MessageInput";
-import { TransportDebugConsole, type DebugEntry } from "@/components/chat/TransportDebugConsole";
 import { Panel } from "@/components/layout/Panel";
 import { AGENT_WS_URL } from "@/lib/config/env";
 import { buildUserMessage } from "@/lib/protocol/clientMessages";
 import { createOrderingBuffer, type OrderedPushResult } from "@/lib/protocol/orderingBuffer";
-import type { ClientMessage, ServerMessage } from "@/lib/protocol/types";
+import type { ClientMessage, JsonObject, JsonValue, ServerMessage } from "@/lib/protocol/types";
 import { agentReducer, initialAgentState, type AgentAction, type AgentState, type ChatMessage } from "@/lib/store/agentStore";
 import { selectChatMessages, selectToolBlockByCallId } from "@/lib/store/selectors";
+import type { TimelineEvent, TimelineEventDirection, TimelineEventKind } from "@/lib/timeline/types";
 import {
   WebSocketManager,
   type InvalidSocketMessageEvent,
@@ -20,13 +20,19 @@ import {
   type WebSocketConnectionStatus,
 } from "@/lib/websocket/websocketManager";
 
-export function ChatPanel() {
+type ChatPanelProps = {
+  selectedCallId: string | null;
+  selectedChatElementId: string | null;
+  onSelectCallId: (callId: string | null) => void;
+  onTimelineEvent: (event: TimelineEvent) => void;
+};
+
+export function ChatPanel({ selectedCallId, selectedChatElementId, onSelectCallId, onTimelineEvent }: ChatPanelProps) {
   const [status, setStatus] = useState<WebSocketConnectionStatus>("idle");
   const [draft, setDraft] = useState("hello");
-  const [entries, setEntries] = useState<DebugEntry[]>([]);
   const [state, setState] = useState<AgentState>(initialAgentState);
   const managerRef = useRef<WebSocketManager | null>(null);
-  const nextIdRef = useRef(1);
+  const nextTimelineIdRef = useRef(1);
   const userMessageCountRef = useRef(1);
   const orderingBufferRef = useRef(createOrderingBuffer({ initialExpectedSeq: 1 }));
   const stateRef = useRef<AgentState>(initialAgentState);
@@ -43,13 +49,13 @@ export function ChatPanel() {
       },
       onOpen: () => {
         orderingBufferRef.current.reset({ initialExpectedSeq: 1 });
-        appendSystemEntry("OPEN", `Connected to ${AGENT_WS_URL}`);
-        appendSystemEntry("ORDERING_RESET", "Ordering buffer reset for a new connection. Expected seq = 1.");
+        recordInternalEvent("CONNECTION", "WebSocket connected", `Connected to ${AGENT_WS_URL}`, { status: "open", url: AGENT_WS_URL });
+        recordInternalEvent("CONNECTION", "Ordering reset", "Ordering buffer reset for a new connection. Expected seq = 1.", { expectedSeq: 1 });
       },
       onMessage: (event) => {
-        appendReceivedEntry(event);
+        recordInboundEvent(event);
         const result = orderingBufferRef.current.push(event.message);
-        appendOrderingOutcome(result);
+        recordOrderingOutcome(result);
         if (result.processed.length > 0) {
           const nextState = applyAction({
             type: "APPLY_PROCESSED_MESSAGES",
@@ -59,22 +65,20 @@ export function ChatPanel() {
         }
       },
       onSend: (event) => {
-        appendOutboundEntry(event);
+        recordOutboundEvent(event);
       },
       onToolAckSuppressed: (event) => {
-        appendSystemEntry("TOOL_ACK_SKIPPED", `Skipped duplicate fast ACK for ${event.callId}.`);
+        recordInternalEvent("TOOL_ACK_SKIPPED", "Duplicate TOOL_ACK suppressed", `Skipped duplicate fast ACK for ${event.callId}.`, { callId: event.callId }, { callId: event.callId });
       },
       onInvalidMessage: (event) => {
-        appendInvalidEntry(event);
+        recordInvalidEvent(event);
       },
       onClose: (event) => {
-        const detail = event.reason
-          ? `Connection closed (${event.code}): ${event.reason}`
-          : `Connection closed (${event.code})`;
-        appendSystemEntry("CLOSE", detail);
+        const summary = event.reason ? `Connection closed (${event.code}): ${event.reason}` : `Connection closed (${event.code})`;
+        recordInternalEvent("CONNECTION", "WebSocket closed", summary, { code: event.code, reason: event.reason });
       },
       onError: () => {
-        appendSystemEntry("ERROR", "WebSocket reported an error event.");
+        recordInternalEvent("CONNECTION", "WebSocket error", "WebSocket reported an error event.", { status: "error" });
       },
     });
 
@@ -101,84 +105,107 @@ export function ChatPanel() {
   function handleProcessedSideEffects(processedMessages: ServerMessage[], nextState: AgentState): void {
     for (const message of processedMessages) {
       if (message.type === "TOOL_RESULT" && !selectToolBlockByCallId(nextState.messages, message.call_id)) {
-        appendSystemEntry("TOOL_RESULT_MISSING", `No matching tool block found for result ${message.call_id}.`);
+        recordInternalEvent(
+          "ERROR",
+          "Missing tool card",
+          `No matching tool block found for result ${message.call_id}.`,
+          { callId: message.call_id },
+          { callId: message.call_id },
+        );
       }
     }
   }
 
-  function appendEntry(entry: DebugEntry): void {
-    setEntries((current) => [entry, ...current].slice(0, 140));
-  }
-
-  function appendSystemEntry(title: string, detail: string): void {
-    appendEntry({
-      id: nextIdRef.current++,
-      direction: "system",
-      title,
-      detail,
-      timestamp: new Date().toLocaleTimeString(),
+  function recordTimelineEvent(event: Omit<TimelineEvent, "id" | "timestamp" | "payloadPreview"> & { payloadPreview?: string }): void {
+    onTimelineEvent({
+      ...event,
+      id: `trace-${nextTimelineIdRef.current++}`,
+      timestamp: Date.now(),
+      payloadPreview: event.payloadPreview ?? previewPayload(event.payload),
     });
   }
 
-  function appendReceivedEntry(event: ParsedSocketMessageEvent): void {
-    appendEntry({
-      id: nextIdRef.current++,
-      direction: "received",
-      title: `RECEIVED ${event.message.type}`,
-      detail: formatReceivedDetail(event),
-      timestamp: new Date().toLocaleTimeString(),
+  function recordInboundEvent(event: ParsedSocketMessageEvent): void {
+    const message = event.message;
+    recordTimelineEvent({
+      kind: message.type,
+      direction: "inbound",
+      title: message.type,
+      summary: summarizeServerMessage(message),
+      payload: serverMessagePayload(message),
+      payloadPreview: message.type === "CONTEXT_SNAPSHOT" ? summarizeContextPayload(message.data) : undefined,
+      seq: message.seq,
+      streamId: "stream_id" in message ? message.stream_id : undefined,
+      callId: "call_id" in message ? message.call_id : undefined,
+      contextId: "context_id" in message ? message.context_id : undefined,
+      relatedChatElementId: relatedChatElementId(message),
     });
   }
 
-  function appendProcessedEntry(message: ServerMessage): void {
-    appendEntry({
-      id: nextIdRef.current++,
-      direction: "processed",
-      title: `PROCESSED ${message.type}`,
-      detail: `${JSON.stringify(message, null, 2)}\nlastFullyProcessedSeq: ${orderingBufferRef.current.getLastFullyProcessedSeq()}`,
-      timestamp: new Date().toLocaleTimeString(),
-    });
-  }
-
-  function appendInvalidEntry(event: InvalidSocketMessageEvent): void {
-    appendEntry({
-      id: nextIdRef.current++,
-      direction: "invalid",
-      title: "INVALID_MESSAGE",
-      detail: event.raw ? `${event.reason}\nraw: ${event.raw}` : event.reason,
-      timestamp: new Date().toLocaleTimeString(),
-    });
-  }
-
-  function appendOutboundEntry(event: OutboundSocketMessageEvent): void {
-    appendEntry({
-      id: nextIdRef.current++,
+  function recordOutboundEvent(event: OutboundSocketMessageEvent): void {
+    const message = event.message;
+    recordTimelineEvent({
+      kind: message.type === "RESUME" ? "CONNECTION" : message.type,
       direction: "outbound",
-      title: event.message.type,
-      detail: formatOutboundDetail(event),
-      timestamp: new Date().toLocaleTimeString(),
+      title: message.type,
+      summary: summarizeClientMessage(message, event.source),
+      payload: clientMessagePayload(message),
+      callId: message.type === "TOOL_ACK" ? message.call_id : undefined,
+      relatedChatElementId: undefined,
     });
   }
 
-  function appendOrderingOutcome(result: OrderedPushResult): void {
+  function recordInvalidEvent(event: InvalidSocketMessageEvent): void {
+    recordTimelineEvent({
+      kind: "INVALID_MESSAGE",
+      direction: "internal",
+      title: "INVALID_MESSAGE",
+      summary: event.reason,
+      payload: event.raw ?? event.reason,
+    });
+  }
+
+  function recordInternalEvent(
+    kind: TimelineEventKind,
+    title: string,
+    summary: string,
+    payload?: JsonValue,
+    links?: { callId?: string; streamId?: string; relatedChatElementId?: string },
+  ): void {
+    recordTimelineEvent({
+      kind,
+      direction: "internal",
+      title,
+      summary,
+      payload,
+      callId: links?.callId,
+      streamId: links?.streamId,
+      relatedChatElementId: links?.relatedChatElementId,
+    });
+  }
+
+  function recordOrderingOutcome(result: OrderedPushResult): void {
     if (result.accepted === "buffered") {
-      appendSystemEntry(
-        "BUFFERED",
-        `Buffered seq ${result.receivedSeq}. Waiting for seq ${result.expectedSeq}. bufferedCount=${result.bufferedCount}`,
-      );
+      recordTimelineEvent({
+        kind: "BUFFERED",
+        direction: "internal",
+        title: "Buffered message",
+        summary: `Buffered seq ${result.receivedSeq}; waiting for seq ${result.expectedSeq}.`,
+        payload: { receivedSeq: result.receivedSeq, expectedSeq: result.expectedSeq, bufferedCount: result.bufferedCount },
+        seq: result.receivedSeq,
+      });
       return;
     }
 
     if (result.accepted === "duplicate") {
-      appendSystemEntry(
-        "DUPLICATE_IGNORED",
-        `Ignored seq ${result.receivedSeq}. expectedSeq=${result.expectedSeq} bufferedCount=${result.bufferedCount}`,
-      );
-      return;
-    }
-
-    for (const message of result.processed) {
-      appendProcessedEntry(message);
+      recordTimelineEvent({
+        kind: "DUPLICATE_IGNORED",
+        direction: "internal",
+        title: "Duplicate ignored",
+        summary: `Ignored seq ${result.receivedSeq}; expected seq ${result.expectedSeq}.`,
+        payload: { receivedSeq: result.receivedSeq, expectedSeq: result.expectedSeq, bufferedCount: result.bufferedCount },
+        seq: result.receivedSeq,
+      });
     }
   }
 
@@ -202,12 +229,12 @@ export function ChatPanel() {
     const result = managerRef.current?.send(message);
 
     if (!result) {
-      appendSystemEntry("ERROR", "WebSocket manager is not ready.");
+      recordInternalEvent("ERROR", "Send failed", "WebSocket manager is not ready.");
       return;
     }
 
     if (!result.ok) {
-      appendSystemEntry("SEND_BLOCKED", result.reason);
+      recordInternalEvent("ERROR", "Send blocked", result.reason);
       return;
     }
 
@@ -222,7 +249,7 @@ export function ChatPanel() {
     });
 
     orderingBufferRef.current.reset({ initialExpectedSeq: 1 });
-    appendSystemEntry("ORDERING_RESET", "Ordering buffer reset for a new server turn. Expected seq = 1.");
+    recordInternalEvent("CONNECTION", "Ordering reset", "Ordering buffer reset for a new server turn. Expected seq = 1.", { expectedSeq: 1 });
     setDraft("");
   }
 
@@ -265,7 +292,13 @@ export function ChatPanel() {
             ) : (
               messages.map((message) => (
                 message.role === "assistant" ? (
-                  <AssistantStream key={message.id} message={message} />
+                  <AssistantStream
+                    key={message.id}
+                    message={message}
+                    onSelectCallId={onSelectCallId}
+                    selectedCallId={selectedCallId}
+                    selectedChatElementId={selectedChatElementId}
+                  />
                 ) : (
                   <UserMessageBubble key={message.id} message={message} />
                 )
@@ -279,11 +312,6 @@ export function ChatPanel() {
           onChange={setDraft}
           onSubmit={handleSend}
           value={draft}
-        />
-
-        <TransportDebugConsole
-          entries={entries}
-          footer={<p className="debug-log__meta">Chat rendering now handles ordered TOKEN, TOOL_CALL, TOOL_RESULT, and STREAM_END events.</p>}
         />
       </div>
     </Panel>
@@ -301,26 +329,108 @@ function UserMessageBubble({ message }: { message: ChatMessage }) {
   );
 }
 
-function formatReceivedDetail(event: ParsedSocketMessageEvent): string {
-  if (event.message.type === "PING" && event.message.challenge === "") {
-    return `corrupt heartbeat: empty challenge\n${JSON.stringify(event.message, null, 2)}\nraw: ${event.raw}`;
+function summarizeServerMessage(message: ServerMessage): string {
+  switch (message.type) {
+    case "TOKEN":
+      return message.text;
+    case "TOOL_CALL":
+      return `${message.tool_name} call_id=${message.call_id}`;
+    case "TOOL_RESULT":
+      return `Result for call_id=${message.call_id}`;
+    case "CONTEXT_SNAPSHOT":
+      return `${message.context_id} · ${summarizeContextPayload(message.data)}`;
+    case "PING":
+      return message.challenge === "" ? "Empty heartbeat challenge" : `challenge=${message.challenge}`;
+    case "STREAM_END":
+      return `stream ${message.stream_id} ended`;
+    case "ERROR":
+      return `${message.code}: ${message.message}`;
+    default:
+      return "Server event";
   }
-
-  return `${JSON.stringify(event.message, null, 2)}\nraw: ${event.raw}`;
 }
 
-function formatOutboundDetail(event: OutboundSocketMessageEvent): string {
-  if (event.message.type === "PONG") {
-    const prefix = event.message.echo === ""
-      ? "heartbeat response to empty challenge"
-      : `heartbeat response (${event.source})`;
+function summarizeClientMessage(message: ClientMessage, source: string): string {
+  switch (message.type) {
+    case "USER_MESSAGE":
+      return message.content;
+    case "PONG":
+      return message.echo === "" ? `PONG empty echo (${source})` : `PONG echo=${message.echo}`;
+    case "TOOL_ACK":
+      return `ACK call_id=${message.call_id}`;
+    case "RESUME":
+      return `Resume from seq ${message.last_seq}`;
+    default:
+      return "Client event";
+  }
+}
 
-    return `${prefix}\n${JSON.stringify(event.message, null, 2)}`;
+function relatedChatElementId(message: ServerMessage): string | undefined {
+  switch (message.type) {
+    case "TOKEN":
+      return `${message.stream_id}:text:${message.seq}`;
+    case "TOOL_CALL":
+    case "TOOL_RESULT":
+      return `${message.stream_id}:tool:${message.call_id}`;
+    default:
+      return undefined;
+  }
+}
+
+function serverMessagePayload(message: ServerMessage): JsonValue {
+  switch (message.type) {
+    case "TOKEN":
+      return message.text;
+    case "TOOL_CALL":
+      return { type: message.type, seq: message.seq, call_id: message.call_id, tool_name: message.tool_name, args: message.args, stream_id: message.stream_id };
+    case "TOOL_RESULT":
+      return { type: message.type, seq: message.seq, call_id: message.call_id, result: message.result, stream_id: message.stream_id };
+    case "CONTEXT_SNAPSHOT":
+      return { type: message.type, seq: message.seq, context_id: message.context_id, data: message.data };
+    case "PING":
+      return { type: message.type, seq: message.seq, challenge: message.challenge };
+    case "STREAM_END":
+      return { type: message.type, seq: message.seq, stream_id: message.stream_id };
+    case "ERROR":
+      return { type: message.type, seq: message.seq, code: message.code, message: message.message };
+    default:
+      return null;
+  }
+}
+
+function clientMessagePayload(message: ClientMessage): JsonValue {
+  switch (message.type) {
+    case "USER_MESSAGE":
+      return { type: message.type, content: message.content };
+    case "PONG":
+      return { type: message.type, echo: message.echo };
+    case "RESUME":
+      return { type: message.type, last_seq: message.last_seq };
+    case "TOOL_ACK":
+      return { type: message.type, call_id: message.call_id };
+    default:
+      return null;
+  }
+}
+
+function previewPayload(payload: JsonValue | undefined): string {
+  if (payload === undefined) {
+    return "";
   }
 
-  if (event.message.type === "TOOL_ACK") {
-    return `tool ack (${event.source})\n${JSON.stringify(event.message, null, 2)}`;
+  if (typeof payload === "string") {
+    return payload.length > 600 ? `${payload.slice(0, 600)}...` : payload;
   }
 
-  return `${event.source} send\n${JSON.stringify(event.message, null, 2)}`;
+  const serialized = JSON.stringify(payload, null, 2);
+  return serialized.length > 1200 ? `${serialized.slice(0, 1200)}...` : serialized;
+}
+
+function summarizeContextPayload(data: JsonObject): string {
+  const approxBytes = new Blob([JSON.stringify(data)]).size;
+  if (approxBytes < 1024) {
+    return `approx ${approxBytes}B`;
+  }
+
+  return `approx ${Math.round(approxBytes / 1024)}KB`;
 }
