@@ -3,6 +3,7 @@
 import type { FormEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { AssistantStream } from "@/components/chat/AssistantStream";
+import { ConnectionBanner } from "@/components/chat/ConnectionBanner";
 import { MessageInput } from "@/components/chat/MessageInput";
 import { Panel } from "@/components/layout/Panel";
 import { AGENT_WS_URL } from "@/lib/config/env";
@@ -11,12 +12,15 @@ import { createOrderingBuffer, type OrderedPushResult } from "@/lib/protocol/ord
 import type { ClientMessage, JsonObject, JsonValue, ServerMessage } from "@/lib/protocol/types";
 import { agentReducer, initialAgentState, type AgentAction, type AgentState, type ChatMessage } from "@/lib/store/agentStore";
 import { selectChatMessages, selectToolBlockByCallId } from "@/lib/store/selectors";
-import type { TimelineEvent, TimelineEventDirection, TimelineEventKind } from "@/lib/timeline/types";
+import type { TimelineEvent, TimelineEventKind } from "@/lib/timeline/types";
 import {
   WebSocketManager,
   type InvalidSocketMessageEvent,
   type OutboundSocketMessageEvent,
   type ParsedSocketMessageEvent,
+  type ReconnectAttemptEvent,
+  type ReconnectScheduledEvent,
+  type ResumeEvent,
   type WebSocketConnectionStatus,
 } from "@/lib/websocket/websocketManager";
 
@@ -28,15 +32,31 @@ type ChatPanelProps = {
   onTimelineEvent: (event: TimelineEvent) => void;
 };
 
+type ReconnectMeta = {
+  attempt: number | null;
+  delayMs: number | null;
+  resumeSeq: number | null;
+};
+
+const initialReconnectMeta: ReconnectMeta = {
+  attempt: null,
+  delayMs: null,
+  resumeSeq: null,
+};
+
 export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatElementId, onSelectCallId, onTimelineEvent }: ChatPanelProps) {
   const [status, setStatus] = useState<WebSocketConnectionStatus>("idle");
   const [draft, setDraft] = useState("hello");
   const [state, setState] = useState<AgentState>(initialAgentState);
+  const [reconnectMeta, setReconnectMeta] = useState<ReconnectMeta>(initialReconnectMeta);
   const managerRef = useRef<WebSocketManager | null>(null);
   const nextTimelineIdRef = useRef(1);
   const userMessageCountRef = useRef(1);
   const orderingBufferRef = useRef(createOrderingBuffer({ initialExpectedSeq: 1 }));
   const stateRef = useRef<AgentState>(initialAgentState);
+  const statusRef = useRef<WebSocketConnectionStatus>("idle");
+  const recoveryPendingRef = useRef(false);
+  const lastAppliedFullyProcessedSeqRef = useRef(0);
 
   useEffect(() => {
     stateRef.current = state;
@@ -45,23 +65,42 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
   useEffect(() => {
     const manager = new WebSocketManager({
       url: AGENT_WS_URL,
+      getResumeSeq: () => lastAppliedFullyProcessedSeqRef.current,
       onStatusChange: (nextStatus) => {
+        statusRef.current = nextStatus;
         setStatus(nextStatus);
       },
       onOpen: () => {
+        if (recoveryPendingRef.current) {
+          recordInternalEvent("CONNECTION", "Socket reopened", "Socket reopened after connection loss.", {
+            status: "open",
+          });
+          recordInternalEvent("CONNECTION", "Reconnect success", `Recovery complete at seq ${lastAppliedFullyProcessedSeqRef.current}.`, {
+            lastSeq: lastAppliedFullyProcessedSeqRef.current,
+          });
+          recoveryPendingRef.current = false;
+          setReconnectMeta(initialReconnectMeta);
+          return;
+        }
+
         orderingBufferRef.current.reset({ initialExpectedSeq: 1 });
         recordInternalEvent("CONNECTION", "WebSocket connected", `Connected to ${AGENT_WS_URL}`, { status: "open", url: AGENT_WS_URL });
         recordInternalEvent("CONNECTION", "Ordering reset", "Ordering buffer reset for a new connection. Expected seq = 1.", { expectedSeq: 1 });
       },
       onMessage: (event) => {
-        recordInboundEvent(event);
         const result = orderingBufferRef.current.push(event.message);
+        if (result.accepted !== "duplicate") {
+          recordInboundEvent(event);
+        }
         recordOrderingOutcome(result);
         if (result.processed.length > 0) {
           const nextState = applyAction({
             type: "APPLY_PROCESSED_MESSAGES",
             messages: result.processed,
           });
+          if (result.lastFullyProcessedSeq !== null) {
+            lastAppliedFullyProcessedSeqRef.current = result.lastFullyProcessedSeq;
+          }
           handleProcessedSideEffects(result.processed, nextState);
         }
       },
@@ -71,15 +110,38 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
       onToolAckSuppressed: (event) => {
         recordInternalEvent("TOOL_ACK_SKIPPED", "Duplicate TOOL_ACK suppressed", `Skipped duplicate fast ACK for ${event.callId}.`, { callId: event.callId }, { callId: event.callId });
       },
+      onReconnectScheduled: (event) => {
+        handleReconnectScheduled(event);
+      },
+      onReconnectAttempt: (event) => {
+        handleReconnectAttempt(event);
+      },
+      onResume: (event) => {
+        handleResume(event);
+      },
       onInvalidMessage: (event) => {
         recordInvalidEvent(event);
       },
       onClose: (event) => {
         const summary = event.reason ? `Connection closed (${event.code}): ${event.reason}` : `Connection closed (${event.code})`;
-        recordInternalEvent("CONNECTION", "WebSocket closed", summary, { code: event.code, reason: event.reason });
+        if (statusRef.current === "closing") {
+          recordInternalEvent("CONNECTION", "WebSocket closed", summary, { code: event.code, reason: event.reason });
+          return;
+        }
+
+        recoveryPendingRef.current = true;
+        recordInternalEvent("CONNECTION", "Connection lost", summary, { code: event.code, reason: event.reason, lastSeq: lastAppliedFullyProcessedSeqRef.current });
       },
       onError: () => {
-        recordInternalEvent("CONNECTION", "WebSocket error", "WebSocket reported an error event.", { status: "error" });
+        if (statusRef.current === "closing") {
+          recordInternalEvent("CONNECTION", "WebSocket error", "WebSocket reported an error event.", { status: "error" });
+          return;
+        }
+
+        recoveryPendingRef.current = true;
+        recordInternalEvent("CONNECTION", "Connection error", "Unexpected WebSocket error; reconnect pending.", {
+          lastSeq: lastAppliedFullyProcessedSeqRef.current,
+        });
       },
     });
 
@@ -92,9 +154,10 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
   }, []);
 
   const messages = selectChatMessages(state);
-  const canConnect = status !== "connecting" && status !== "open";
-  const canDisconnect = status === "connecting" || status === "open" || status === "error";
+  const canConnect = !["connecting", "open", "reconnecting", "resuming"].includes(status);
+  const canDisconnect = ["connecting", "open", "reconnecting", "resuming", "error"].includes(status);
   const canSend = status === "open";
+  const showConnectionBanner = ["reconnecting", "resuming", "closed", "error"].includes(status);
 
   function applyAction(action: AgentAction): AgentState {
     const nextState = agentReducer(stateRef.current, action);
@@ -120,6 +183,57 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
         );
       }
     }
+  }
+
+  function handleReconnectScheduled(event: ReconnectScheduledEvent): void {
+    recoveryPendingRef.current = true;
+    setReconnectMeta((current) => ({
+      ...current,
+      attempt: event.attempt,
+      delayMs: event.delayMs,
+    }));
+    recordInternalEvent(
+      "CONNECTION",
+      "Reconnect scheduled",
+      `Reconnect attempt ${event.attempt} scheduled in ${event.delayMs}ms.`,
+      { attempt: event.attempt, delayMs: event.delayMs },
+    );
+  }
+
+  function handleReconnectAttempt(event: ReconnectAttemptEvent): void {
+    recoveryPendingRef.current = true;
+    setReconnectMeta((current) => ({
+      ...current,
+      attempt: event.attempt,
+      delayMs: null,
+    }));
+    recordInternalEvent(
+      "CONNECTION",
+      "Reconnect attempt",
+      `Reconnect attempt ${event.attempt}.`,
+      { attempt: event.attempt },
+    );
+  }
+
+  function handleResume(event: ResumeEvent): void {
+    recoveryPendingRef.current = true;
+    setReconnectMeta((current) => ({
+      ...current,
+      resumeSeq: event.lastSeq,
+    }));
+    orderingBufferRef.current.reset({ initialExpectedSeq: event.lastSeq + 1 });
+    recordInternalEvent(
+      "CONNECTION",
+      "Replay reset",
+      `Ordering buffer reset for replay from seq ${event.lastSeq + 1}.`,
+      { expectedSeq: event.lastSeq + 1, lastSeq: event.lastSeq },
+    );
+    recordInternalEvent(
+      "CONNECTION",
+      "Replay processing",
+      `Replay processing from seq ${event.lastSeq + 1}.`,
+      { expectedSeq: event.lastSeq + 1, lastSeq: event.lastSeq },
+    );
   }
 
   function recordTimelineEvent(event: Omit<TimelineEvent, "id" | "timestamp" | "payloadPreview"> & { payloadPreview?: string }): void {
@@ -221,6 +335,8 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
 
   function handleDisconnect(): void {
     managerRef.current?.disconnect();
+    setReconnectMeta(initialReconnectMeta);
+    recoveryPendingRef.current = false;
   }
 
   function handleSend(event: FormEvent<HTMLFormElement>): void {
@@ -255,6 +371,7 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
     });
 
     orderingBufferRef.current.reset({ initialExpectedSeq: 1 });
+    lastAppliedFullyProcessedSeqRef.current = 0;
     recordInternalEvent("CONNECTION", "Ordering reset", "Ordering buffer reset for a new server turn. Expected seq = 1.", { expectedSeq: 1 });
     setDraft("");
   }
@@ -268,10 +385,20 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
           <span className={`pill pill--status pill--${status}`}>{status}</span>
           <span className="pill">{AGENT_WS_URL}</span>
           <span className="pill">next seq {orderingBufferRef.current.getExpectedSeq()}</span>
+          <span className="pill">last seq {lastAppliedFullyProcessedSeqRef.current}</span>
         </div>
       }
     >
       <div className="stack">
+        {showConnectionBanner ? (
+          <ConnectionBanner
+            attempt={reconnectMeta.attempt ?? undefined}
+            delayMs={reconnectMeta.delayMs ?? undefined}
+            resumeSeq={reconnectMeta.resumeSeq ?? undefined}
+            status={status}
+          />
+        ) : null}
+
         <article className="card">
           <p className="card__label">Connection controls</p>
           <div className="button-row">

@@ -1,11 +1,14 @@
-import { buildPong, buildToolAck, serializeClientMessage } from "@/lib/protocol/clientMessages";
+import { buildPong, buildResume, buildToolAck, serializeClientMessage } from "@/lib/protocol/clientMessages";
 import type { ClientMessage, ServerMessage, ValidationResult } from "@/lib/protocol/types";
+import { createReconnectBackoff } from "@/lib/websocket/reconnectBackoff";
 import { parseServerMessage } from "@/lib/protocol/validators";
 
 export type WebSocketConnectionStatus =
   | "idle"
   | "connecting"
   | "open"
+  | "reconnecting"
+  | "resuming"
   | "closing"
   | "closed"
   | "error";
@@ -26,16 +29,33 @@ export interface SuppressedToolAckEvent {
 
 export interface OutboundSocketMessageEvent {
   message: ClientMessage;
-  source: "manual" | "heartbeat" | "tool_ack";
+  source: "manual" | "heartbeat" | "tool_ack" | "resume";
+}
+
+export interface ReconnectScheduledEvent {
+  attempt: number;
+  delayMs: number;
+}
+
+export interface ReconnectAttemptEvent {
+  attempt: number;
+}
+
+export interface ResumeEvent {
+  lastSeq: number;
 }
 
 export interface WebSocketManagerOptions {
   url: string;
+  getResumeSeq?: () => number;
   onStatusChange?: (status: WebSocketConnectionStatus) => void;
   onOpen?: () => void;
   onMessage?: (event: ParsedSocketMessageEvent) => void;
   onSend?: (event: OutboundSocketMessageEvent) => void;
   onToolAckSuppressed?: (event: SuppressedToolAckEvent) => void;
+  onReconnectScheduled?: (event: ReconnectScheduledEvent) => void;
+  onReconnectAttempt?: (event: ReconnectAttemptEvent) => void;
+  onResume?: (event: ResumeEvent) => void;
   onInvalidMessage?: (event: InvalidSocketMessageEvent) => void;
   onClose?: (event: CloseEvent) => void;
   onError?: (event: Event) => void;
@@ -45,7 +65,15 @@ export class WebSocketManager {
   private socket: WebSocket | null = null;
   private status: WebSocketConnectionStatus = "idle";
   private readonly acknowledgedToolCalls = new Set<string>();
+  private readonly reconnectBackoff = createReconnectBackoff({
+    initialMs: 500,
+    factor: 2,
+    maxMs: 10000,
+  });
   private readonly options: WebSocketManagerOptions;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private intentionalDisconnect = false;
+  private shouldResumeOnOpen = false;
 
   constructor(options: WebSocketManagerOptions) {
     this.options = options;
@@ -60,38 +88,18 @@ export class WebSocketManager {
       return;
     }
 
+    this.intentionalDisconnect = false;
+    this.shouldResumeOnOpen = false;
+    this.clearReconnectTimer();
     this.setStatus("connecting");
-    const socket = new WebSocket(this.options.url);
-    this.socket = socket;
-
-    socket.onopen = () => {
-      if (this.socket !== socket) {
-        return;
-      }
-      this.setStatus("open");
-      this.acknowledgedToolCalls.clear();
-      this.options.onOpen?.();
-    };
-
-    socket.onmessage = (event) => {
-      void this.handleMessage(event);
-    };
-
-    socket.onclose = (event) => {
-      if (this.socket === socket) {
-        this.socket = null;
-      }
-      this.setStatus("closed");
-      this.options.onClose?.(event);
-    };
-
-    socket.onerror = (event) => {
-      this.setStatus("error");
-      this.options.onError?.(event);
-    };
+    this.openSocket();
   }
 
   disconnect(): void {
+    this.intentionalDisconnect = true;
+    this.shouldResumeOnOpen = false;
+    this.clearReconnectTimer();
+
     if (!this.socket) {
       if (this.status !== "idle") {
         this.setStatus("closed");
@@ -104,7 +112,71 @@ export class WebSocketManager {
   }
 
   send(message: ClientMessage): ValidationResult<void> {
+    if (this.status === "reconnecting" || this.status === "resuming") {
+      return {
+        ok: false,
+        reason: "WebSocket is reconnecting",
+      };
+    }
+
     return this.sendInternal(message, "manual");
+  }
+
+  private openSocket(): void {
+    const socket = new WebSocket(this.options.url);
+    this.socket = socket;
+
+    socket.onopen = () => {
+      if (this.socket !== socket) {
+        return;
+      }
+
+      this.reconnectBackoff.reset();
+      this.clearReconnectTimer();
+
+      if (this.shouldResumeOnOpen) {
+        const lastSeq = this.options.getResumeSeq?.() ?? 0;
+        this.setStatus("resuming");
+        this.options.onResume?.({ lastSeq });
+        this.sendInternal(buildResume(lastSeq), "resume");
+        this.shouldResumeOnOpen = false;
+        this.setStatus("open");
+        this.options.onOpen?.();
+        return;
+      }
+
+      this.setStatus("open");
+      this.options.onOpen?.();
+    };
+
+    socket.onmessage = (event) => {
+      void this.handleMessage(event);
+    };
+
+    socket.onclose = (event) => {
+      if (this.socket === socket) {
+        this.socket = null;
+      }
+
+      this.options.onClose?.(event);
+
+      if (this.intentionalDisconnect || this.status === "closing") {
+        this.setStatus("closed");
+        return;
+      }
+
+      this.scheduleReconnect();
+    };
+
+    socket.onerror = (event) => {
+      this.options.onError?.(event);
+      if (this.intentionalDisconnect || this.status === "closing") {
+        this.setStatus("error");
+        return;
+      }
+
+      this.scheduleReconnect();
+    };
   }
 
   private sendInternal(message: ClientMessage, source: OutboundSocketMessageEvent["source"]): ValidationResult<void> {
@@ -173,6 +245,37 @@ export class WebSocketManager {
     if (result.ok) {
       this.acknowledgedToolCalls.add(callId);
     }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer || this.intentionalDisconnect) {
+      return;
+    }
+
+    const delayMs = this.reconnectBackoff.nextDelay();
+    const attempt = this.reconnectBackoff.getAttempt();
+    this.shouldResumeOnOpen = true;
+    this.setStatus("reconnecting");
+    this.options.onReconnectScheduled?.({ attempt, delayMs });
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.intentionalDisconnect) {
+        return;
+      }
+
+      this.options.onReconnectAttempt?.({ attempt });
+      this.openSocket();
+    }, delayMs);
+  }
+
+  private clearReconnectTimer(): void {
+    if (!this.reconnectTimer) {
+      return;
+    }
+
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
   }
 
   private setStatus(status: WebSocketConnectionStatus): void {
