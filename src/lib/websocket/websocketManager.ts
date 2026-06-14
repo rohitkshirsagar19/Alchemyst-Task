@@ -1,7 +1,7 @@
 import { buildPong, buildResume, buildToolAck, serializeClientMessage } from "@/lib/protocol/clientMessages";
 import type { ClientMessage, ServerMessage, ValidationResult } from "@/lib/protocol/types";
-import { createReconnectBackoff } from "@/lib/websocket/reconnectBackoff";
 import { parseServerMessage } from "@/lib/protocol/validators";
+import { createReconnectBackoff } from "@/lib/websocket/reconnectBackoff";
 
 export type WebSocketConnectionStatus =
   | "idle"
@@ -25,6 +25,11 @@ export interface InvalidSocketMessageEvent {
 
 export interface SuppressedToolAckEvent {
   callId: string;
+}
+
+export interface QueuedToolAckEvent {
+  callId: string;
+  reason: string;
 }
 
 export interface OutboundSocketMessageEvent {
@@ -53,6 +58,7 @@ export interface WebSocketManagerOptions {
   onMessage?: (event: ParsedSocketMessageEvent) => void;
   onSend?: (event: OutboundSocketMessageEvent) => void;
   onToolAckSuppressed?: (event: SuppressedToolAckEvent) => void;
+  onToolAckQueued?: (event: QueuedToolAckEvent) => void;
   onReconnectScheduled?: (event: ReconnectScheduledEvent) => void;
   onReconnectAttempt?: (event: ReconnectAttemptEvent) => void;
   onResume?: (event: ResumeEvent) => void;
@@ -65,6 +71,7 @@ export class WebSocketManager {
   private socket: WebSocket | null = null;
   private status: WebSocketConnectionStatus = "idle";
   private readonly acknowledgedToolCalls = new Set<string>();
+  private readonly pendingToolAcks = new Set<string>();
   private readonly reconnectBackoff = createReconnectBackoff({
     initialMs: 500,
     factor: 2,
@@ -139,12 +146,14 @@ export class WebSocketManager {
         this.setStatus("resuming");
         this.options.onResume?.({ lastSeq });
         this.sendInternal(buildResume(lastSeq), "resume");
+        this.flushPendingToolAcks();
         this.shouldResumeOnOpen = false;
         this.setStatus("open");
         this.options.onOpen?.();
         return;
       }
 
+      this.flushPendingToolAcks();
       this.setStatus("open");
       this.options.onOpen?.();
     };
@@ -238,11 +247,40 @@ export class WebSocketManager {
       return;
     }
 
-    // TOOL_ACK is intentionally sent from the raw validated message path.
-    // Chaos mode can delay ordered rendering behind seq gaps, but the server's
-    // ACK timeout starts as soon as it sends TOOL_CALL.
     const result = this.sendInternal(buildToolAck(callId), "tool_ack");
     if (result.ok) {
+      this.pendingToolAcks.delete(callId);
+      this.acknowledgedToolCalls.add(callId);
+      return;
+    }
+
+    // Chaos mode can drop the socket right as TOOL_CALL arrives. Queue the ACK so
+    // it can be flushed immediately after RESUME on the next connection instead of
+    // waiting for the replayed TOOL_CALL to reach the raw message path again.
+    this.pendingToolAcks.add(callId);
+    this.options.onToolAckQueued?.({
+      callId,
+      reason: result.reason,
+    });
+  }
+
+  private flushPendingToolAcks(): void {
+    if (this.pendingToolAcks.size === 0) {
+      return;
+    }
+
+    for (const callId of [...this.pendingToolAcks]) {
+      if (this.acknowledgedToolCalls.has(callId)) {
+        this.pendingToolAcks.delete(callId);
+        continue;
+      }
+
+      const result = this.sendInternal(buildToolAck(callId), "tool_ack");
+      if (!result.ok) {
+        return;
+      }
+
+      this.pendingToolAcks.delete(callId);
       this.acknowledgedToolCalls.add(callId);
     }
   }

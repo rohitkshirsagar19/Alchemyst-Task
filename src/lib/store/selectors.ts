@@ -4,6 +4,10 @@ export function selectChatMessages(state: AgentState): ChatMessage[] {
   return state.messages;
 }
 
+export function selectHasActiveAssistantStream(state: AgentState): boolean {
+  return state.messages.some((message) => message.role === "assistant" && message.status === "streaming");
+}
+
 export function selectMessageText(message: ChatMessage): string {
   if (message.content) {
     return message.content;

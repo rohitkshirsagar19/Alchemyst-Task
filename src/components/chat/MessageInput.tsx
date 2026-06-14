@@ -18,9 +18,10 @@ export function MessageInput({ disabled, onChange, onSubmit, value }: MessageInp
           id="message"
           name="message"
           className="composer__input"
+          disabled={disabled}
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          placeholder="Type a prompt for the agent server"
+          placeholder={disabled ? "Wait for the current turn or reconnect to finish" : "Type a prompt for the agent server"}
         />
         <button type="submit" className="composer__button" disabled={disabled}>
           Send

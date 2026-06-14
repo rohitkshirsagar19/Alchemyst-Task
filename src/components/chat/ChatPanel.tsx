@@ -11,7 +11,7 @@ import { buildUserMessage } from "@/lib/protocol/clientMessages";
 import { createOrderingBuffer, type OrderedPushResult } from "@/lib/protocol/orderingBuffer";
 import type { ClientMessage, JsonObject, JsonValue, ServerMessage } from "@/lib/protocol/types";
 import { agentReducer, initialAgentState, type AgentAction, type AgentState, type ChatMessage } from "@/lib/store/agentStore";
-import { selectChatMessages, selectToolBlockByCallId } from "@/lib/store/selectors";
+import { selectChatMessages, selectHasActiveAssistantStream, selectToolBlockByCallId } from "@/lib/store/selectors";
 import type { TimelineEvent, TimelineEventKind } from "@/lib/timeline/types";
 import {
   WebSocketManager,
@@ -108,7 +108,10 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
         recordOutboundEvent(event);
       },
       onToolAckSuppressed: (event) => {
-        recordInternalEvent("TOOL_ACK_SKIPPED", "Duplicate TOOL_ACK suppressed", `Skipped duplicate fast ACK for ${event.callId}.`, { callId: event.callId }, { callId: event.callId });
+        recordInternalEvent("TOOL_ACK_SKIPPED", "Duplicate TOOL_ACK suppressed", "Skipped duplicate fast ACK for " + event.callId + ".", { callId: event.callId }, { callId: event.callId });
+      },
+      onToolAckQueued: (event) => {
+        recordInternalEvent("CONNECTION", "Queued TOOL_ACK", "Queued ACK for " + event.callId + "; will retry after reconnect.", { callId: event.callId, reason: event.reason }, { callId: event.callId });
       },
       onReconnectScheduled: (event) => {
         handleReconnectScheduled(event);
@@ -154,9 +157,10 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
   }, []);
 
   const messages = selectChatMessages(state);
+  const hasActiveAssistantStream = selectHasActiveAssistantStream(state);
   const canConnect = !["connecting", "open", "reconnecting", "resuming"].includes(status);
   const canDisconnect = ["connecting", "open", "reconnecting", "resuming", "error"].includes(status);
-  const canSend = status === "open";
+  const canSend = status === "open" && !hasActiveAssistantStream;
   const showConnectionBanner = ["reconnecting", "resuming", "closed", "error"].includes(status);
 
   function applyAction(action: AgentAction): AgentState {
@@ -347,6 +351,13 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
       return;
     }
 
+    if (hasActiveAssistantStream) {
+      recordInternalEvent("ERROR", "Send blocked", "A previous assistant turn is still streaming; wait for it to finish before sending a new prompt.", {
+        activeStream: true,
+      });
+      return;
+    }
+
     const message = buildUserMessage(content);
     const result = managerRef.current?.send(message);
 
@@ -386,6 +397,7 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
           <span className="pill">{AGENT_WS_URL}</span>
           <span className="pill">next seq {orderingBufferRef.current.getExpectedSeq()}</span>
           <span className="pill">last seq {lastAppliedFullyProcessedSeqRef.current}</span>
+          {hasActiveAssistantStream ? <span className="pill">stream busy</span> : null}
         </div>
       }
     >
