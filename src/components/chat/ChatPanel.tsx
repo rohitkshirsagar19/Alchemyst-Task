@@ -21,13 +21,14 @@ import {
 } from "@/lib/websocket/websocketManager";
 
 type ChatPanelProps = {
+  onContextSnapshot: (snapshot: { contextId: string; seq: number; data: JsonValue }) => void;
   selectedCallId: string | null;
   selectedChatElementId: string | null;
   onSelectCallId: (callId: string | null) => void;
   onTimelineEvent: (event: TimelineEvent) => void;
 };
 
-export function ChatPanel({ selectedCallId, selectedChatElementId, onSelectCallId, onTimelineEvent }: ChatPanelProps) {
+export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatElementId, onSelectCallId, onTimelineEvent }: ChatPanelProps) {
   const [status, setStatus] = useState<WebSocketConnectionStatus>("idle");
   const [draft, setDraft] = useState("hello");
   const [state, setState] = useState<AgentState>(initialAgentState);
@@ -104,6 +105,11 @@ export function ChatPanel({ selectedCallId, selectedChatElementId, onSelectCallI
 
   function handleProcessedSideEffects(processedMessages: ServerMessage[], nextState: AgentState): void {
     for (const message of processedMessages) {
+      if (message.type === "CONTEXT_SNAPSHOT") {
+        onContextSnapshot({ contextId: message.context_id, seq: message.seq, data: message.data });
+        continue;
+      }
+
       if (message.type === "TOOL_RESULT" && !selectToolBlockByCallId(nextState.messages, message.call_id)) {
         recordInternalEvent(
           "ERROR",

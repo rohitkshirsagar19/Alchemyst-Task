@@ -9,6 +9,8 @@ import { defaultTimelineFilters, selectTimelineRows, type TimelineFiltersState }
 import type { TimelineEvent, TimelineRowEvent, TokenGroupTimelineEvent } from "@/lib/timeline/types";
 
 type TraceTimelineProps = {
+  selectedContextId: string | null;
+  onSelectContextSnapshot: (contextId: string, index?: number) => void;
   events: TimelineEvent[];
   selectedCallId: string | null;
   selectedChatElementId: string | null;
@@ -22,6 +24,8 @@ export function TraceTimeline({
   selectedChatElementId,
   onSelectCallId,
   onSelectChatElement,
+  onSelectContextSnapshot,
+  selectedContextId,
 }: TraceTimelineProps) {
   const [filters, setFilters] = useState<TimelineFiltersState>(defaultTimelineFilters);
   const rows = useMemo(() => selectTimelineRows(events, filters), [events, filters]);
@@ -33,6 +37,10 @@ export function TraceTimeline({
 
     if (event.callId) {
       onSelectCallId(event.callId);
+    }
+
+    if (event.contextId) {
+      onSelectContextSnapshot(event.contextId);
     }
   }
 
@@ -62,7 +70,7 @@ export function TraceTimeline({
               ) : (
                 <TimelineRow
                   event={event}
-                  isSelected={event.callId === selectedCallId || event.relatedChatElementId === selectedChatElementId}
+                  isSelected={event.callId === selectedCallId || event.relatedChatElementId === selectedChatElementId || event.contextId === selectedContextId}
                   key={event.id}
                   onSelect={handleSelect}
                 />

@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --import tsx --test src/lib/protocol/orderingBuffer.test.ts src/lib/timeline/tokenGrouper.test.ts"
+    "test": "node --import tsx --test src/lib/protocol/orderingBuffer.test.ts src/lib/timeline/tokenGrouper.test.ts src/lib/context/jsonDiff.test.ts"
   },
   "dependencies": {
     "next": "^15.0.0",
