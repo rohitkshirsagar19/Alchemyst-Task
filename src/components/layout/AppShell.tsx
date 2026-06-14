@@ -4,13 +4,16 @@ import { useState } from "react";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { ContextInspector } from "@/components/context/ContextInspector";
 import { TraceTimeline } from "@/components/timeline/TraceTimeline";
-import type { JsonValue } from "@/lib/protocol/types";
-import { diffJson } from "@/lib/context/jsonDiff";
+import {
+  appendContextSnapshotState,
+  selectContextSnapshotState,
+  selectLatestContextSnapshotState,
+} from "@/lib/context/contextState";
 import {
   initialContextInspectorState,
   type ContextInspectorState,
-  type ContextSnapshotRecord,
 } from "@/lib/context/types";
+import type { JsonValue } from "@/lib/protocol/types";
 import type { TimelineEvent } from "@/lib/timeline/types";
 
 export function AppShell() {
@@ -24,62 +27,11 @@ export function AppShell() {
   }
 
   function appendContextSnapshot(snapshot: { contextId: string; seq: number; data: JsonValue }): void {
-    setContextState((current) => {
-      const existingHistory = current.historiesById[snapshot.contextId];
-      if (existingHistory?.snapshots.some((entry) => entry.seq === snapshot.seq)) {
-        return current;
-      }
-
-      const previous = existingHistory?.snapshots.at(-1);
-      const record: ContextSnapshotRecord = {
-        id: `${snapshot.contextId}:${snapshot.seq}`,
-        contextId: snapshot.contextId,
-        seq: snapshot.seq,
-        timestamp: Date.now(),
-        data: snapshot.data,
-        diffFromPrevious: diffJson(previous?.data, snapshot.data),
-        approxSizeBytes: new Blob([JSON.stringify(snapshot.data)]).size,
-      };
-      const snapshots = [...(existingHistory?.snapshots ?? []), record];
-      const shouldAutoSelect = !existingHistory || !existingHistory.isUserScrubbing || current.selectedContextId === snapshot.contextId;
-
-      return {
-        ...current,
-        selectedContextId: current.selectedContextId ?? snapshot.contextId,
-        historiesById: {
-          ...current.historiesById,
-          [snapshot.contextId]: {
-            contextId: snapshot.contextId,
-            snapshots,
-            selectedIndex: shouldAutoSelect ? snapshots.length - 1 : existingHistory.selectedIndex,
-            isUserScrubbing: existingHistory?.isUserScrubbing ?? false,
-          },
-        },
-      };
-    });
+    setContextState((current) => appendContextSnapshotState(current, snapshot));
   }
 
   function selectContextSnapshot(contextId: string, index?: number): void {
-    setContextState((current) => {
-      const history = current.historiesById[contextId];
-      if (!history) {
-        return { ...current, selectedContextId: contextId };
-      }
-
-      const selectedIndex = clamp(index ?? history.selectedIndex, 0, Math.max(0, history.snapshots.length - 1));
-      return {
-        ...current,
-        selectedContextId: contextId,
-        historiesById: {
-          ...current.historiesById,
-          [contextId]: {
-            ...history,
-            selectedIndex,
-            isUserScrubbing: selectedIndex !== history.snapshots.length - 1,
-          },
-        },
-      };
-    });
+    setContextState((current) => selectContextSnapshotState(current, contextId, index));
 
     window.requestAnimationFrame(() => {
       document.getElementById("context-inspector")?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -87,25 +39,7 @@ export function AppShell() {
   }
 
   function selectLatestContextSnapshot(contextId: string): void {
-    setContextState((current) => {
-      const history = current.historiesById[contextId];
-      if (!history) {
-        return current;
-      }
-
-      return {
-        ...current,
-        selectedContextId: contextId,
-        historiesById: {
-          ...current.historiesById,
-          [contextId]: {
-            ...history,
-            selectedIndex: Math.max(0, history.snapshots.length - 1),
-            isUserScrubbing: false,
-          },
-        },
-      };
-    });
+    setContextState((current) => selectLatestContextSnapshotState(current, contextId));
   }
 
   function handleSelectChatElement(elementId: string | null): void {
@@ -171,8 +105,4 @@ export function AppShell() {
       </section>
     </main>
   );
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
 }
