@@ -257,4 +257,4 @@ src/
 - The UI is optimized for assignment observability and protocol inspection rather than visual polish.
 
 ## Submission Notes
-The chaos-mode screen recording link will be provided in the submission email.
+The demo vidoe is in the docs/recording
