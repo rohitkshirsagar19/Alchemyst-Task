@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Agent Console",
-  description: "Next.js frontend scaffold for the Alchemyst AI agent assignment."
+  description: "Streaming protocol client for the Alchemyst agent server."
 };
 
 type RootLayoutProps = {

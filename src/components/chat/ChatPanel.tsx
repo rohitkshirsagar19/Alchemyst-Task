@@ -24,11 +24,20 @@ import {
   type WebSocketConnectionStatus,
 } from "@/lib/websocket/websocketManager";
 
+export type ShellConnectionSummary = {
+  status: WebSocketConnectionStatus;
+  wsUrl: string;
+  lastSeq: number;
+  nextSeq: number;
+  hasActiveStream: boolean;
+};
+
 type ChatPanelProps = {
   onContextSnapshot: (snapshot: { contextId: string; seq: number; data: JsonValue }) => void;
   selectedCallId: string | null;
   selectedChatElementId: string | null;
   onSelectCallId: (callId: string | null) => void;
+  onShellConnectionChange: (summary: ShellConnectionSummary) => void;
   onTimelineEvent: (event: TimelineEvent) => void;
 };
 
@@ -44,11 +53,12 @@ const initialReconnectMeta: ReconnectMeta = {
   resumeSeq: null,
 };
 
-export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatElementId, onSelectCallId, onTimelineEvent }: ChatPanelProps) {
+export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatElementId, onSelectCallId, onShellConnectionChange, onTimelineEvent }: ChatPanelProps) {
   const [status, setStatus] = useState<WebSocketConnectionStatus>("idle");
   const [draft, setDraft] = useState("hello");
   const [state, setState] = useState<AgentState>(initialAgentState);
   const [reconnectMeta, setReconnectMeta] = useState<ReconnectMeta>(initialReconnectMeta);
+  const [orderingMeta, setOrderingMeta] = useState({ nextSeq: 1, lastSeq: 0 });
   const managerRef = useRef<WebSocketManager | null>(null);
   const nextTimelineIdRef = useRef(1);
   const userMessageCountRef = useRef(1);
@@ -84,6 +94,7 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
         }
 
         orderingBufferRef.current.reset({ initialExpectedSeq: 1 });
+        setOrderingMeta({ nextSeq: 1, lastSeq: 0 });
         recordInternalEvent("CONNECTION", "WebSocket connected", `Connected to ${AGENT_WS_URL}`, { status: "open", url: AGENT_WS_URL });
         recordInternalEvent("CONNECTION", "Ordering reset", "Ordering buffer reset for a new connection. Expected seq = 1.", { expectedSeq: 1 });
       },
@@ -93,14 +104,18 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
           recordInboundEvent(event);
         }
         recordOrderingOutcome(result);
+        if (result.lastFullyProcessedSeq !== null) {
+          lastAppliedFullyProcessedSeqRef.current = result.lastFullyProcessedSeq;
+        }
+        setOrderingMeta({
+          nextSeq: result.expectedSeq,
+          lastSeq: result.lastFullyProcessedSeq ?? lastAppliedFullyProcessedSeqRef.current,
+        });
         if (result.processed.length > 0) {
           const nextState = applyAction({
             type: "APPLY_PROCESSED_MESSAGES",
             messages: result.processed,
           });
-          if (result.lastFullyProcessedSeq !== null) {
-            lastAppliedFullyProcessedSeqRef.current = result.lastFullyProcessedSeq;
-          }
           handleProcessedSideEffects(result.processed, nextState);
         }
       },
@@ -162,6 +177,16 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
   const canDisconnect = ["connecting", "open", "reconnecting", "resuming", "error"].includes(status);
   const canSend = status === "open" && !hasActiveAssistantStream;
   const showConnectionBanner = ["reconnecting", "resuming", "closed", "error"].includes(status);
+
+  useEffect(() => {
+    onShellConnectionChange({
+      status,
+      wsUrl: AGENT_WS_URL,
+      lastSeq: orderingMeta.lastSeq,
+      nextSeq: orderingMeta.nextSeq,
+      hasActiveStream: hasActiveAssistantStream,
+    });
+  }, [hasActiveAssistantStream, onShellConnectionChange, orderingMeta.lastSeq, orderingMeta.nextSeq, status]);
 
   function applyAction(action: AgentAction): AgentState {
     const nextState = agentReducer(stateRef.current, action);
@@ -226,6 +251,7 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
       resumeSeq: event.lastSeq,
     }));
     orderingBufferRef.current.reset({ initialExpectedSeq: event.lastSeq + 1 });
+    setOrderingMeta({ nextSeq: event.lastSeq + 1, lastSeq: event.lastSeq });
     recordInternalEvent(
       "CONNECTION",
       "Replay reset",
@@ -383,20 +409,21 @@ export function ChatPanel({ onContextSnapshot, selectedCallId, selectedChatEleme
 
     orderingBufferRef.current.reset({ initialExpectedSeq: 1 });
     lastAppliedFullyProcessedSeqRef.current = 0;
+    setOrderingMeta({ nextSeq: 1, lastSeq: 0 });
     recordInternalEvent("CONNECTION", "Ordering reset", "Ordering buffer reset for a new server turn. Expected seq = 1.", { expectedSeq: 1 });
     setDraft("");
   }
 
   return (
     <Panel
-      title="Chat Panel"
-      description="Streaming assistant renderer backed by the ordered protocol event stream."
+      title="Chat"
+      description="Ordered stream renderer"
       headerSlot={
         <div className="toolbar">
           <span className={`pill pill--status pill--${status}`}>{status}</span>
           <span className="pill">{AGENT_WS_URL}</span>
-          <span className="pill">next seq {orderingBufferRef.current.getExpectedSeq()}</span>
-          <span className="pill">last seq {lastAppliedFullyProcessedSeqRef.current}</span>
+          <span className="pill">next seq {orderingMeta.nextSeq}</span>
+          <span className="pill">last seq {orderingMeta.lastSeq}</span>
           {hasActiveAssistantStream ? <span className="pill">stream busy</span> : null}
         </div>
       }
